@@ -21,19 +21,21 @@ Key insight: "The loop didn't change at all. I just added tools."
 
 import os
 import subprocess
+import uuid
 from pathlib import Path
 
-from anthropic import Anthropic
+from langchain_ollama import ChatOllama
+from langchain.messages import ToolMessage
+from langchain.tools import tool
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.25:11434")
+MODEL = os.getenv("OLLAMA_MODEL", "qwen3-coder-next:q8_0")
+llm = ChatOllama(model=MODEL, base_url=OLLAMA_BASE_URL)
 
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks. Act, don't explain."
 
@@ -45,7 +47,9 @@ def safe_path(p: str) -> Path:
     return path
 
 
-def run_bash(command: str) -> str:
+@tool
+def bash(command: str) -> str:
+    """Run a shell command."""
     dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
     if any(d in command for d in dangerous):
         return "Error: Dangerous command blocked"
@@ -58,7 +62,9 @@ def run_bash(command: str) -> str:
         return "Error: Timeout (120s)"
 
 
-def run_read(path: str, limit: int = None) -> str:
+@tool
+def read_file(path: str, limit: int | None = None) -> str:
+    """Read file contents."""
     try:
         text = safe_path(path).read_text()
         lines = text.splitlines()
@@ -69,7 +75,9 @@ def run_read(path: str, limit: int = None) -> str:
         return f"Error: {e}"
 
 
-def run_write(path: str, content: str) -> str:
+@tool
+def write_file(path: str, content: str) -> str:
+    """Write content to file."""
     try:
         fp = safe_path(path)
         fp.parent.mkdir(parents=True, exist_ok=True)
@@ -79,7 +87,9 @@ def run_write(path: str, content: str) -> str:
         return f"Error: {e}"
 
 
-def run_edit(path: str, old_text: str, new_text: str) -> str:
+@tool
+def edit_file(path: str, old_text: str, new_text: str) -> str:
+    """Replace exact text in file."""
     try:
         fp = safe_path(path)
         content = fp.read_text()
@@ -91,43 +101,32 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
         return f"Error: {e}"
 
 
-# -- The dispatch map: {tool_name: handler} --
-TOOL_HANDLERS = {
-    "bash":       lambda **kw: run_bash(kw["command"]),
-    "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
-    "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
-    "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
-}
-
-TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
-     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-]
+TOOLS = [bash, read_file, write_file, edit_file]
+TOOL_MAP = {t.name: t for t in TOOLS}
 
 
 def agent_loop(messages: list):
+    if not messages or messages[0].get("role") != "system":
+        messages.insert(0, {"role": "system", "content": SYSTEM})
+    
     while True:
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000,
-        )
-        messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        response = llm.bind_tools(TOOLS).invoke(messages)
+        messages.append({"role": "assistant", "content": response.content or ""})
+        
+        if not response.tool_calls:
             return
-        results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                print(f"> {block.name}: {output[:200]}")
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": output})
-        messages.append({"role": "user", "content": results})
+        
+        for tool_call in response.tool_calls:
+            name = tool_call["name"]
+            args = tool_call["args"]
+            
+            if name == "bash":
+                print(f"\033[33m$ {args['command']}\033[0m")
+            else:
+                print(f"> {name}")
+            
+            tool_output = TOOL_MAP[name].invoke(args)
+            messages.append(ToolMessage(content=tool_output, tool_call_id=tool_call["id"]))
 
 
 if __name__ == "__main__":
@@ -141,9 +140,8 @@ if __name__ == "__main__":
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
+        for msg in reversed(history):
+            if msg.get("role") == "assistant" and msg.get("content"):
+                print(msg["content"])
+                break
         print()
