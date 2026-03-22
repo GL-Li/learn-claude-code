@@ -34,7 +34,7 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.25:11434")
-MODEL = os.getenv("OLLAMA_MODEL", "qwen3-coder-next:latest")
+MODEL = os.getenv("OLLAMA_MODEL", "qwen3-coder-next:q8_0")
 
 llm = ChatOllama(
     model=MODEL,
