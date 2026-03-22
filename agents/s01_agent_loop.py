@@ -26,33 +26,33 @@ policy, hooks, and lifecycle controls on top.
 
 import os
 import subprocess
+import uuid
 
-from anthropic import Anthropic
+from ollama import Client
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-api_key = os.getenv("ANTHROPIC_AUTH_TOKEN") or os.getenv("CLAUDE_API_KEY")
-if not api_key:
-    raise ValueError("Either ANTHROPIC_AUTH_TOKEN or CLAUDE_API_KEY environment variable must be set")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.25:11434")
+client = Client(host=OLLAMA_BASE_URL)
 
-if os.getenv("ANTHROPIC_BASE_URL"):
-    client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"), api_key=api_key)
-else:
-    client = Anthropic(api_key=api_key)
-
-MODEL = os.environ["MODEL_ID"]
+MODEL = os.getenv("OLLAMA_MODEL", "qwen3-coder-next:latest")
 
 SYSTEM = f"You are a coding agent at {os.getcwd()}. Use bash to solve tasks. Act, don't explain."
 
 TOOLS = [{
-    "name": "bash",
-    "description": "Run a shell command.",
-    "input_schema": {
-        "type": "object",
-        "properties": {"command": {"type": "string"}},
-        "required": ["command"],
-    },
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": "Run a shell command",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The command to run"}
+            },
+            "required": ["command"]
+        }
+    }
 }]
 
 
@@ -71,26 +71,32 @@ def run_bash(command: str) -> str:
 
 # -- The core pattern: a while loop that calls tools until the model stops --
 def agent_loop(messages: list):
+    # Prepend system prompt if this is the first message
+    if not messages or messages[0].get("role") != "system":
+        messages.insert(0, {"role": "system", "content": SYSTEM})
+    
     while True:
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000,
+        response = client.chat(
+            model=MODEL, messages=messages,
+            tools=TOOLS,
         )
         # Append assistant turn
-        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "assistant", "content": response.message.content or ""})
         # If the model didn't call a tool, we're done
-        if response.stop_reason != "tool_use":
+        if not hasattr(response.message, 'tool_calls') or not response.message.tool_calls:
             return
-        # Execute each tool call, collect results
-        results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                print(f"\033[33m$ {block.input['command']}\033[0m")
-                output = run_bash(block.input["command"])
-                print(output[:200])
-                results.append({"type": "tool_result", "tool_use_id": block.id,
-                                "content": output})
-        messages.append({"role": "user", "content": results})
+        # Execute each tool call
+        for tool_call in response.message.tool_calls:
+            command = tool_call.function.arguments.get("command", "")
+            print(f"\033[33m$ {command}\033[0m")
+            output = run_bash(command)
+            print(output[:200])
+            # Use tool role with the generated ID
+            messages.append({
+                "role": "tool",
+                "tool_call_id": str(uuid.uuid4()),
+                "content": output
+            })
 
 
 if __name__ == "__main__":
@@ -104,9 +110,9 @@ if __name__ == "__main__":
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
+        # Find the last assistant message in history
+        for msg in reversed(history):
+            if msg.get("role") == "assistant" and msg.get("content"):
+                print(msg["content"])
+                break
         print()
