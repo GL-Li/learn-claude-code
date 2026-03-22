@@ -28,15 +28,18 @@ import os
 import subprocess
 import uuid
 
-from ollama import Client
+from langchain_ollama import ChatOllama
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.25:11434")
-client = Client(host=OLLAMA_BASE_URL)
-
 MODEL = os.getenv("OLLAMA_MODEL", "qwen3-coder-next:latest")
+
+llm = ChatOllama(
+    model=MODEL,
+    base_url=OLLAMA_BASE_URL,
+)
 
 SYSTEM = f"You are a coding agent at {os.getcwd()}. Use bash to solve tasks. Act, don't explain."
 
@@ -76,18 +79,15 @@ def agent_loop(messages: list):
         messages.insert(0, {"role": "system", "content": SYSTEM})
     
     while True:
-        response = client.chat(
-            model=MODEL, messages=messages,
+        response = llm.invoke(
+            messages,
             tools=TOOLS,
         )
-        # Append assistant turn
-        messages.append({"role": "assistant", "content": response.message.content or ""})
-        # If the model didn't call a tool, we're done
-        if not hasattr(response.message, 'tool_calls') or not response.message.tool_calls:
+        messages.append({"role": "assistant", "content": response.content or ""})
+        if not response.tool_calls:
             return
-        # Execute each tool call
-        for tool_call in response.message.tool_calls:
-            command = tool_call.function.arguments.get("command", "")
+        for tool_call in response.tool_calls:
+            command = tool_call["args"].get("command", "")
             print(f"\033[33m$ {command}\033[0m")
             output = run_bash(command)
             print(output[:200])
