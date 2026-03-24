@@ -29,23 +29,22 @@ Key insight: "The agent can track its own progress -- and I can see it."
 
 import os
 import subprocess
+import uuid
 from pathlib import Path
 
-from anthropic import Anthropic
+from langchain_ollama import ChatOllama
+from langchain.messages import ToolMessage
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.25:11434")
+MODEL = os.getenv("OLLAMA_MODEL", "qwen3-coder-next:q8_0")
+llm = ChatOllama(model=MODEL, base_url=OLLAMA_BASE_URL)
 
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
 
-SYSTEM = f"""You are a coding agent at {WORKDIR}.
-Use the todo tool to plan multi-step tasks. Mark in_progress before starting, completed when done.
-Prefer tools over prose."""
+SYSTEM = f"You are a coding agent at {WORKDIR}. Use the todo tool to plan multi-step tasks. Mark in_progress before starting, completed when done. Act, don't explain."
 
 
 # -- TodoManager: structured state the LLM writes to --
@@ -162,33 +161,35 @@ TOOLS = [
 
 # -- Agent loop with nag reminder injection --
 def agent_loop(messages: list):
+    if not messages or messages[0].get("role") != "system":
+        messages.insert(0, {"role": "system", "content": SYSTEM})
+    
     rounds_since_todo = 0
     while True:
-        # Nag reminder is injected below, alongside tool results
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000,
-        )
-        messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        response = llm.bind_tools(TOOLS).invoke(messages)
+        messages.append({"role": "assistant", "content": response.content or ""})
+        
+        if not response.tool_calls:
             return
+        
         results = []
         used_todo = False
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                try:
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                except Exception as e:
-                    output = f"Error: {e}"
-                print(f"> {block.name}: {str(output)[:200]}")
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
-                if block.name == "todo":
-                    used_todo = True
+        for tool_call in response.tool_calls:
+            name = tool_call["name"]
+            args = tool_call["args"]
+            handler = TOOL_HANDLERS.get(name)
+            try:
+                output = handler(**args) if handler else f"Unknown tool: {name}"
+            except Exception as e:
+                output = f"Error: {e}"
+            print(f"> {name}: {str(output)[:200]}")
+            results.append(ToolMessage(content=str(output), tool_call_id=tool_call["id"]))
+            if name == "todo":
+                used_todo = True
         rounds_since_todo = 0 if used_todo else rounds_since_todo + 1
         if rounds_since_todo >= 3:
-            results.insert(0, {"type": "text", "text": "<reminder>Update your todos.</reminder>"})
-        messages.append({"role": "user", "content": results})
+            results.insert(0, ToolMessage(content="<reminder>Update your todos.</reminder>", tool_call_id=str(uuid.uuid4())))
+        messages.extend(results)
 
 
 if __name__ == "__main__":
@@ -202,9 +203,8 @@ if __name__ == "__main__":
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
+        for msg in reversed(history):
+            if msg.get("role") == "assistant" and msg.get("content"):
+                print(msg["content"])
+                break
         print()
