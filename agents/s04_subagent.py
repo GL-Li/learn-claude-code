@@ -10,11 +10,11 @@ context, sharing the filesystem, then returns only a summary to the parent.
     +------------------+             +------------------+
     | messages=[...]   |             | messages=[]      |  <-- fresh
     |                  |  dispatch   |                  |
-    | tool: task       | ---------->| while tool_use:  |
-    |   prompt="..."   |            |   call tools     |
-    |   description="" |            |   append results |
-    |                  |  summary   |                  |
-    |   result = "..." | <--------- | return last text |
+    | tool: task       | ----------> | while tool_use:  |
+    |   prompt="..."   |             |   call tools     |
+    |   description="" |             |   append results |
+    |                  |  summary    |                  |
+    |   result = "..." | <---------  | return last text |
     +------------------+             +------------------+
               |
     Parent context stays clean.
@@ -27,17 +27,16 @@ import os
 import subprocess
 from pathlib import Path
 
-from anthropic import Anthropic
+from langchain_ollama import ChatOllama
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.25:11434")
+MODEL = os.getenv("OLLAMA_MODEL", "qwen3-coder-next:q8_0")
+llm = ChatOllama(model=MODEL, base_url=OLLAMA_BASE_URL)
 
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use the task tool to delegate exploration or subtasks."
 SUBAGENT_SYSTEM = f"You are a coding subagent at {WORKDIR}. Complete the given task, then summarize your findings."
@@ -115,23 +114,22 @@ CHILD_TOOLS = [
 # -- Subagent: fresh context, filtered tools, summary-only return --
 def run_subagent(prompt: str) -> str:
     sub_messages = [{"role": "user", "content": prompt}]  # fresh context
+    if not sub_messages or sub_messages[0].get("role") != "system":
+        sub_messages.insert(0, {"role": "system", "content": SUBAGENT_SYSTEM})
     for _ in range(30):  # safety limit
-        response = client.messages.create(
-            model=MODEL, system=SUBAGENT_SYSTEM, messages=sub_messages,
-            tools=CHILD_TOOLS, max_tokens=8000,
-        )
-        sub_messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        response = llm.bind_tools(CHILD_TOOLS).invoke(sub_messages)
+        sub_messages.append({"role": "assistant", "content": response.content or ""})
+        if not response.tool_calls:
             break
         results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)[:50000]})
+        for tool_call in response.tool_calls:
+            name = tool_call["name"]
+            handler = TOOL_HANDLERS.get(name)
+            output = handler(**tool_call["args"]) if handler else f"Unknown tool: {name}"
+            results.append({"type": "tool_result", "tool_use_id": tool_call["id"], "content": str(output)[:50000]})
         sub_messages.append({"role": "user", "content": results})
     # Only the final text returns to the parent -- child context is discarded
-    return "".join(b.text for b in response.content if hasattr(b, "text")) or "(no summary)"
+    return response.content or "(no summary)"
 
 
 # -- Parent tools: base tools + task dispatcher --
@@ -142,27 +140,26 @@ PARENT_TOOLS = CHILD_TOOLS + [
 
 
 def agent_loop(messages: list):
+    if not messages or messages[0].get("role") != "system":
+        messages.insert(0, {"role": "system", "content": SYSTEM})
     while True:
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=PARENT_TOOLS, max_tokens=8000,
-        )
-        messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        response = llm.bind_tools(PARENT_TOOLS).invoke(messages)
+        messages.append({"role": "assistant", "content": response.content or ""})
+        if not response.tool_calls:
             return
         results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                if block.name == "task":
-                    desc = block.input.get("description", "subtask")
-                    print(f"> task ({desc}): {block.input['prompt'][:80]}")
-                    output = run_subagent(block.input["prompt"])
-                else:
-                    handler = TOOL_HANDLERS.get(block.name)
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                print(f"  {str(output)[:200]}")
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
-        messages.append({"role": "user", "content": results})
+        for tool_call in response.tool_calls:
+            name = tool_call["name"]
+            if name == "task":
+                desc = tool_call["args"].get("description", "subtask")
+                print(f"> task ({desc}): {tool_call['args']['prompt'][:80]}")
+                output = run_subagent(tool_call["args"]["prompt"])
+            else:
+                handler = TOOL_HANDLERS.get(name)
+                output = handler(**tool_call["args"]) if handler else f"Unknown tool: {name}"
+            print(f"  {str(output)[:200]}")
+            results.append({"type": "tool_result", "tool_use_id": tool_call["id"], "content": str(output)})
+        messages.extend(results)
 
 
 if __name__ == "__main__":
@@ -176,9 +173,8 @@ if __name__ == "__main__":
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
+        for msg in reversed(history):
+            if msg.get("role") == "assistant" and msg.get("content"):
+                print(msg["content"])
+                break
         print()
