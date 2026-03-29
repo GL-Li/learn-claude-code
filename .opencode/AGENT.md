@@ -6,6 +6,17 @@ This document describes the development environment and patterns for AI agents i
 
 This project uses **uv** for Python package management.
 
+## LLM model
+Use local Ollama model for test. When asked to use Ollama model, use this one:
+
+```python
+from langchain_ollama import ChatOllama
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.25:11434")
+MODEL = os.getenv("OLLAMA_MODEL", "qwen3-coder-next:q8_0")
+llm = ChatOllama(model=MODEL, base_url=OLLAMA_BASE_URL)
+```
+
+
 ### Running Python Scripts
 
 Use `uv run` to execute Python agent scripts:

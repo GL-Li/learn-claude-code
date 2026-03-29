@@ -40,17 +40,16 @@ import re
 import subprocess
 from pathlib import Path
 
-from anthropic import Anthropic
+from langchain_ollama import ChatOllama
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.25:11434")
+MODEL = os.getenv("OLLAMA_MODEL", "qwen3-coder-next:q8_0")
+llm = ChatOllama(model=MODEL, base_url=OLLAMA_BASE_URL)
 
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
 SKILLS_DIR = WORKDIR / "skills"
 
 
@@ -185,26 +184,33 @@ TOOLS = [
 ]
 
 
+from langchain.messages import ToolMessage
+import uuid
+
+
 def agent_loop(messages: list):
+    if not messages or messages[0].get("role") != "system":
+        messages.insert(0, {"role": "system", "content": SYSTEM})
+    
     while True:
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000,
-        )
-        messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        response = llm.bind_tools(TOOLS).invoke(messages)
+        messages.append({"role": "assistant", "content": response.content or ""})
+        
+        if not response.tool_calls:
             return
+        
         results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                try:
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                except Exception as e:
-                    output = f"Error: {e}"
-                print(f"> {block.name}: {str(output)[:200]}")
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
-        messages.append({"role": "user", "content": results})
+        for tool_call in response.tool_calls:
+            name = tool_call["name"]
+            args = tool_call["args"]
+            handler = TOOL_HANDLERS.get(name)
+            try:
+                output = handler(**args) if handler else f"Unknown tool: {name}"
+            except Exception as e:
+                output = f"Error: {e}"
+            print(f"> {name}: {str(output)[:200]}")
+            results.append(ToolMessage(content=str(output), tool_call_id=tool_call["id"]))
+        messages.extend(results)
 
 
 if __name__ == "__main__":
@@ -218,9 +224,8 @@ if __name__ == "__main__":
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
+        for msg in reversed(history):
+            if msg.get("role") == "assistant" and msg.get("content"):
+                print(msg["content"])
+                break
         print()
