@@ -70,12 +70,6 @@ wheels = [
 ]
 
 [[package]]
-name = "dotenv-python"
-version = "0.0.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/c8/ed/9004fd73042bd1777b236fd55e4fc2b7be3a4c60e16b8528538926f04ecb/dotenv-python-0.0.1.zip", hash = "sha256:362e170ca8fd69a70c1aca1fda2ddad0ac270e161e81e59f4039ec11decc14fa", size = 1824 }
-
-[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -178,14 +172,12 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "anthropic" },
-    { name = "dotenv-python" },
     { name = "python-dotenv" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=0.86.0" },
-    { name = "dotenv-python", specifier = ">=0.0.1" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
 ]
 
